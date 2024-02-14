@@ -1,0 +1,819 @@
+import datetime
+import logging
+import threading
+
+import gspread
+import mysql.connector
+from google.oauth2 import service_account
+
+# Конфигурация базы данных
+db_config = {
+    'host': '185.120.57.125',
+    'user': 'admin',
+    'password': 'v8S7b$82j51d1',
+    'database': 'webpanel'
+}
+
+google_creds_file = 'data/credentials.json'
+logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(threadName)s] %(levelname)s: %(message)s',
+                    datefmt='%Y-%m-%d %H:%M:%S')
+
+
+def convert_to_number(value, value_type=float):
+    try:
+        return value_type(value.replace(' ', '').replace(',', '.').replace(' ', '').strip())
+    except:
+        return 0.0 if value_type is float else 0
+
+
+def parse_date(date_str):
+    formats = [
+        "%Y-%m-%d %H:%M:%S",  # '2023-12-31 23:59:59'
+        "%d-%m-%Y %H:%M:%S",  # '31-12-2023 23:59:59'
+        "%Y.%m.%d %H:%M:%S",  # '2023-12-31 23:59:59'
+        "%d.%m.%Y %H:%M:%S",  # '31-12-2023 23:59:59'
+        "%d.%m.%Y %H:%M",  # '31-12-2023 23:59:59'
+        "%Y-%m-%d",  # '2023-12-31'
+        "%Y-%m-%d",  # '2023-12-31'
+        "%d.%m.%Y",  # '2023-12-31'
+        "%d-%m-%Y",  # '31-12-2023'
+        "%m/%d/%Y",  # '12/31/2023'
+        "%m/%d/%Y %H:%M:%S",  # '12/31/2023 23:59:59'
+        "%Y-%m-%d %H:%M",  # '2023-12-31 23:59'
+        "%Y-%m-%d %H:%M",  # '2023-12-31 23:59'
+        "%d-%m-%Y %H:%M",  # '31-12-2023 23:59'
+        "%m/%d/%Y %H:%M",  # '12/31/2023 23:59'
+        "%H:%M:%S",  # '23:59:59'
+        "%H:%M",  # '23:59'
+        "%Y-%m-%dT%H:%M:%S",  # '2023-12-31T23:59:59'
+    ]
+
+    for fmt in formats:
+        try:
+            return datetime.datetime.strptime(date_str, fmt)
+        except ValueError:
+            continue
+    return None
+
+
+class SQLManager:
+    def __init__(self, pool_name="mypool", pool_size=10):
+        self.dbconfig = {
+            "host": db_config['host'],
+            "user": db_config['user'],
+            "password": db_config['password'],
+            "database": db_config['database']
+        }
+        self.pool = mysql.connector.pooling.MySQLConnectionPool(
+            pool_name=pool_name,
+            pool_size=pool_size,
+            pool_reset_session=True,
+            **self.dbconfig
+        )
+
+    def execute_query(self, query, params=None):
+        conn = self.pool.get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(query, params or ())
+            result = cursor.fetchall()
+            cursor.close()
+            return result
+        finally:
+            conn.close()
+
+    def update_query(self, query, params=None):
+        conn = self.pool.get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(query, params or ())
+            conn.commit()
+            cursor.close()
+        finally:
+            conn.close()
+
+    def many_update_query(self, query, params=None, batch_size=10000):
+        conn = self.pool.get_connection()
+        try:
+            cursor = conn.cursor()
+            if params:
+                for i in range(0, len(params), batch_size):
+                    batch = params[i:i + batch_size]
+                    cursor.executemany(query, batch)
+                    conn.commit()
+            else:
+                cursor.execute(query)
+                conn.commit()
+            cursor.close()
+        finally:
+            conn.close()
+
+
+class Sheet:
+    def __init__(self):
+        creds = service_account.Credentials.from_service_account_file(
+            google_creds_file,
+            scopes=["https://www.googleapis.com/auth/spreadsheets.readonly"]
+        )
+        self.client = gspread.authorize(creds)
+
+    def read_sheet(self, sheet_url, sheet_id, numericise_ignore=['all']):
+        try:
+            sheet = self.client.open_by_url(sheet_url)
+            worksheet = sheet.get_worksheet_by_id(sheet_id)
+            data = worksheet.get_all_values()
+
+            headers = data[0]
+            unique_headers = []
+            header_count = {}
+
+            # Обработка заголовков для уникальности
+            for header in headers:
+                if header in header_count:
+                    header_count[header] += 1
+                    unique_header = f"{header}_{header_count[header]}"
+                else:
+                    header_count[header] = 1
+                    unique_header = header
+                unique_headers.append(unique_header)
+
+            # Создание словаря для каждой строки
+            rows = data[1:]
+            result = [dict(zip(unique_headers, row)) for row in rows]
+
+            return result
+        except Exception as e:
+            logging.error(f'ERROR IN {sheet_url, sheet_id}: {e}')
+
+
+class DataSynchronizer:
+    def __init__(self):
+        self.sheet = Sheet()
+        self.db_manager = SQLManager()
+
+    def synchronize(self, values: dict):
+        threads = []
+        for key, value in values.items():
+            thread = threading.Thread(target=self.synchronize_table,
+                                      args=(value.get("sheet_url"), value.get("sheet_id"), key))
+            threads.append(thread)
+            thread.start()
+
+        for thread in threads:
+            thread.join()
+
+    def synchronize_bot(self, table_name):
+        table_values = values.get(table_name)
+        self.synchronize_table(table_values.get('sheet_url'), table_values.get('sheet_id'), table_name)
+
+    def synchronize_table(self, sheet_url, sheet_id, table_name):
+        logging.info(f'Starting synchronization for {table_name}')
+        rows = self.sheet.read_sheet(sheet_url, sheet_id, numericise_ignore=['all'])
+        if rows:
+            logging.info(f'{table_name} rows: {len(rows)}')
+        else:
+            logging.info(f'{table_name} rows: 0')
+            return
+
+        if table_name == "res_screen":
+            self.synchronize_res_screen(rows, table_name)
+        elif table_name == "playerrecord":
+            self.synchronize_tables(rows, table_name)
+        elif table_name == "res_bros":
+            self.synchronize_res_bros(rows, table_name)
+        elif table_name == "rateCurrencyGroup":
+            self.synchronize_cur_group(rows, table_name)
+        elif table_name == 'rateCurrencyAgent':
+            self.synchronize_cur_agent(rows, table_name)
+        elif table_name == 'res_bros_rate_currency':
+            self.synchronize_res_bros_rate_currency(rows, table_name)
+        elif table_name == 'res_bros_terms_of_clubs':
+            self.synchronize_res_bros_terms_of_clubs(rows, table_name)
+        elif table_name == 'playerdata':
+            self.synchronize_playerdata(rows, table_name)
+        elif table_name == 'manual_broses':
+            self.synchronize_manual_broses(rows, table_name)
+        elif table_name == 'mtt_report':
+            self.synchronize_mtt_report(sheet_url, sheet_id, table_name)
+        elif table_name == 'mtt_userreport':
+            self.synchronize_mtt_userreport(rows, table_name)
+        elif table_name == 'mtt_audit':
+            self.synchronize_mtt_audit(rows, table_name)
+        elif table_name == 'mtt_trainer':
+            self.synchronize_mtt_trainer(rows, table_name)
+        elif table_name == 'mtt_players':
+            self.synchronize_mtt_players(rows, table_name)
+
+    def synchronize_mtt_players(self, rows, table_name):
+        keys = ['month', 'nickname', 'abi', 'trainer_name', 'comment', 'status', 'user_id', 'trainer_id']
+        data = []
+        trainers_id = self.db_manager.execute_query(f"SELECT * FROM mtt_trainers;")
+
+        for row in rows:
+            row = dict(zip(keys, row.values()))
+            if not row.get('month'):
+                continue
+            try:
+                row['trainer_id'] = [x[0] for x in trainers_id if row['trainer_name'] == x[2]] or None
+                if row['trainer_id']:
+                    row['trainer_id'] = row['trainer_id'][0]
+                row['month'] = parse_date(row['month'])
+                row['user_id'] = convert_to_number(row['user_id'], int)
+                row['abi'] = convert_to_number(row['abi'], int)
+                data.append((row['month'], row['user_id'], row['nickname'], row['abi'], row['status'], row['trainer_id']))
+            except Exception as e:
+                logging.error(f'Error processing row in {table_name}: {e}')
+        print(len(data))
+        if data:
+            try:
+                self.db_manager.update_query('TRUNCATE TABLE mtt_players;')
+                insert_update_query = """
+                                    INSERT INTO mtt_players (date, user_id, user_name, abi, status, trainer_id) 
+                                    VALUES (%s, %s, %s, %s, %s, %s);
+                                """
+                self.db_manager.many_update_query(insert_update_query, data)
+                logging.info(f'Synchronization for {table_name} completed successfully')
+            except Exception as e:
+                logging.error(f'Error during database operation for {table_name}: {e}')
+        else:
+            logging.info(f'No data to synchronize for {table_name}')
+
+
+    def synchronize_mtt_trainer(self, rows, table_name):
+        keys = ['month', 'nickname', 'abi', 'trainer_name', 'comment', 'status', 'user_id', 'trainer_id']
+        data = []
+        for row in rows:
+            row = dict(zip(keys, row.values()))
+            if not row.get('month'):
+                continue
+            try:
+                if [x for x in data if x[1].lower() == row['trainer_name'].lower()]:
+                    continue
+                row['user_id'] = convert_to_number(row['user_id'], int)
+                row['trainer_id'] = convert_to_number(row['trainer_id'], int)
+
+                data.append((row['trainer_id'], row['trainer_name']))
+            except Exception as e:
+                logging.error(f'Error processing row in {table_name}: {e}')
+        if data:
+            try:
+                self.db_manager.update_query('TRUNCATE TABLE mtt_trainers;')
+                insert_update_query = """
+                                    INSERT INTO mtt_trainers (trainer_id, trainer_name) VALUES (%s, %s);
+                                """
+                self.db_manager.many_update_query(insert_update_query, data)
+                logging.info(f'Synchronization for {table_name} completed successfully')
+            except Exception as e:
+                logging.error(f'Error during database operation for {table_name}: {e}')
+        else:
+            logging.info(f'No data to synchronize for {table_name}')
+
+    def synchronize_mtt_audit(self, rows, table_name):
+        keys = ['date', 'month', 'nickname', 'status', 'method', 'room', 'user nick', 'user sum USD', 'Fee USD',
+                'comment', 'сумма в валюте', 'ком-са в валюте', 'валюта', 'Кем', 'итоговая сумма', 'начало кассы',
+                'остаток по кассе']
+
+        data = []
+
+        for row in rows:
+            row = dict(zip(keys, row.values()))  # Переименование ключей
+            if not row.get('date'):
+                continue
+            try:
+                row['date'] = parse_date(row['date'])
+                row['user sum USD'] = convert_to_number(row['user sum USD'])
+                row['Fee USD'] = convert_to_number(row['Fee USD'])
+                row['сумма в валюте'] = convert_to_number(row['сумма в валюте'])
+                row['ком-са в валюте'] = convert_to_number(row['ком-са в валюте'])
+                row['итоговая сумма'] = convert_to_number(row['итоговая сумма'])
+                row['начало кассы'] = convert_to_number(row['начало кассы'])
+                row['остаток по кассе'] = convert_to_number(row['остаток по кассе'])
+
+                data.append((row['date'], row['status'], row['method'],
+                             row['room'], row['user nick'], row['user sum USD'], row['Fee USD'], row['comment'],
+                             row['сумма в валюте'], row['ком-са в валюте'], row['валюта'], row['Кем'],
+                             row['итоговая сумма'], row['начало кассы'], row['остаток по кассе'], row['nickname']))
+            except Exception as e:
+                logging.error(f'Error processing row in {table_name}: {e}')
+
+        if data:
+            try:
+                self.db_manager.update_query('TRUNCATE TABLE mtt_audit;')
+                insert_update_query = """
+                                    INSERT INTO mtt_audit (date, status, method, room, user_name, user_sum_usd,
+                                    fee_usd, comment, currency_amount, currency_commission, currency, by_whom, 
+                                    total_amount, start_cas, residue_cas, admin_name) 
+                                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s);
+                                """
+                self.db_manager.many_update_query(insert_update_query, data)
+                logging.info(f'Synchronization for {table_name} completed successfully')
+            except Exception as e:
+                logging.error(f'Error during database operation for {table_name}: {e}')
+        else:
+            logging.info(f'No data to synchronize for {table_name}')
+
+    def synchronize_mtt_userreport(self, sheet_url, sheet_id, table_name):
+        logging.info(f'Starting synchronization for {table_name}')
+        rows = self.sheet.read_sheet(sheet_url, sheet_id, numericise_ignore=['all'])
+        logging.info(f'{table_name} rows: {len(rows)}')
+
+        keys = ['date', 'nickname', 'room_name', 'start_cas', 'end_cas', 'tour_num', 'reenrty', 'profit', 'tour_sum',
+                'month', 'start_cas_link', 'end_cas_link', 'start_cas_cur', 'end_cas_cur', 'profit_cur', 'currency',
+                'user_id']
+
+        data = []
+        for row in rows:
+            row = dict(zip(keys, row.values()))  # Переименование ключей
+            if not row.get('date'):
+                continue
+            try:
+                row['date'] = parse_date(row['date'])
+                row['start_cas'] = convert_to_number(row['start_cas'])
+                row['tour_num'] = convert_to_number(row['tour_num'], int)
+                row['reenrty'] = convert_to_number(row['reenrty'], int)
+                row['profit'] = convert_to_number(row['profit'])
+                row['start_cas_cur'] = convert_to_number(row['start_cas_cur'])
+                row['end_cas'] = convert_to_number(row['end_cas'])
+                row['tour_sum'] = convert_to_number(row['tour_sum'])
+                row['end_cas_cur'] = convert_to_number(row['end_cas_cur'])
+                row['profit_cur'] = convert_to_number(row['profit_cur'])
+                row['user_id'] = convert_to_number(row['user_id'])
+
+                data.append((row['date'], row['nickname'], row['room_name'], row['start_cas'], row['end_cas'],
+                             row['tour_num'], row['reenrty'], row['profit'], row['tour_sum'], row['month'],
+                             row['start_cas_link'], row['end_cas_link'], row['start_cas_cur'], row['end_cas_cur'],
+                             row['profit_cur'], row['currency'], row['start_cas_link'], row['end_cas_link'],
+                             row['user_id']))
+            except Exception as e:
+                logging.error(f'Error processing row in {table_name}: {e}')
+
+        if data:
+            try:
+                self.db_manager.update_query('TRUNCATE TABLE mtt_userreport;')
+                insert_update_query = """
+                    INSERT INTO mtt_userreport 
+                    (datetime, user_name, app, start_cas, end_cas, tour_num, reentry, profit, tour_sum, month, 
+                     start_cas_link, end_cas_link, start_usd, end_usd, profit_usd, course, start_url, end_url, user_id) 
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s);
+                """
+
+                self.db_manager.many_update_query(insert_update_query, data)
+                logging.info(f'Synchronization for {table_name} completed successfully')
+            except Exception as e:
+                logging.error(f'Error during database operation for {table_name}: {e}')
+        else:
+            logging.info(f'No data to synchronize for {table_name}')
+
+    def synchronize_mtt_report(self, sheet_url, sheet_id, table_name):
+        def update_trainers(trainers_from_sheet):
+            existing_trainers = self.db_manager.execute_query("SELECT * FROM MTT_trainers")
+            existing_trainers_ids = {trainer[1] for trainer in existing_trainers}
+            data = []
+            for trainer_id, trainer_name in trainers_from_sheet:
+                if trainer_id not in existing_trainers_ids:
+                    data.append((trainer_id, trainer_name))
+            if data:
+                try:
+                    insert_update_query = """
+                        INSERT INTO MTT_trainers (trainer_id, trainer_name)
+                        VALUES (%s, %s);
+                    """
+                    self.db_manager.many_update_query(insert_update_query, data)
+                    logging.info(f'Synchronization for MTT_trainers completed successfully')
+                except Exception as e:
+                    logging.error(f'Error during database operation for MTT_trainers: {e}')
+
+        def update_players(players_from_sheet):
+            existing_players = self.db_manager.execute_query("SELECT * FROM MTT_players")
+            trainers_db = self.db_manager.execute_query("SELECT * FROM MTT_trainers")
+
+            trainer_id_to_db_id = {trainer[1]: trainer[0] for trainer in trainers_db}
+
+            data = []
+            for player_data in players_from_sheet:
+                date_number, user_name, abi, trainer_name, _, status, user_id, sheet_trainer_id = player_data
+
+                # Конвертировать число в дату
+                try:
+                    date = (datetime.datetime(1900, 1, 1) + datetime.timedelta(days=int(date_number) - 2)).strftime(
+                        '%Y-%m-%d')
+                except ValueError:
+                    print(f"Error converting date from value: {date_number}")
+                    continue
+                # Получение ID тренера из базы данных на основе ID тренера из Google Sheets
+                trainer_db_id = trainer_id_to_db_id.get(sheet_trainer_id)
+                if not trainer_db_id:
+                    trainer_db_id = None
+
+                player_exists = any(
+                    player[3] == user_name and player[1].strftime('%Y-%m-%d') == date for player in existing_players)
+                if not player_exists:
+                    data.append((date, user_id, user_name, abi, trainer_db_id))
+            if data:
+                try:
+                    insert_update_query = """
+                        INSERT INTO MTT_players (date, user_id, user_name, abi, trainer_id)
+                        VALUES (%s, %s, %s, %s, %s);
+                    """
+                    self.db_manager.many_update_query(insert_update_query, data)
+                    logging.info(f'Synchronization for MTT_players completed successfully')
+                except Exception as e:
+                    logging.error(f'Error during database operation for MTT_players: {e}')
+
+        try:
+            sh = self.sheet.client.open_by_url(sheet_url)
+            # wks = sh.worksheet('список игроков')
+            wks = sh.get_worksheet_by_id(sheet_id)
+            players_data = wks.get('A:H', value_render_option='FORMULA')[1:]
+            trainers_data = set((int(data[7] or 0), data[3] or 0) for data in players_data if int(data[7] or 0) != 0)
+            print(trainers_data)
+            # update_trainers(trainers_data)
+            # update_players(players_data)
+            logging.info(f'Synchronization for {table_name} completed successfully')
+        except Exception as e:
+            logging.error(f'Error during database operation for {table_name}: {e}')
+
+    def synchronize_manual_broses(self, rows, table_name):
+        keys = ['Дата', 'ник', 'айди игрока', 'айди агента', 'руки', 'рейк', 'вин', 'клуб id', 'apps', 'club_name']
+
+        data = []
+        for row in rows:
+            row = dict(zip(keys, row.values()))  # Переименование ключей
+            if not row.get('Дата'):
+                continue
+            try:
+                row['Дата'] = parse_date(row['Дата'])
+                if not row['apps']:
+                    row['apps'] = 'PokerBros'
+                row['рейк'] = row['рейк'].replace(',', '.')
+                row['вин'] = row['вин'].replace(',', '.')
+
+                if not row['айди игрока'].isdigit():
+                    logging.warning(f'Invalid player ID: {row["айди игрока"]}')
+
+                data.append((row['Дата'], row['ник'], row['айди игрока'], row['айди агента'], row['руки'], row['рейк'],
+                             row['вин'], row['клуб id'], row['apps'], row['club_name']))
+            except Exception as e:
+                logging.error(f'Error processing row in {table_name}: {e}')
+
+        if data:
+            try:
+                self.db_manager.update_query('TRUNCATE TABLE CASH_manualbroses;')
+                insert_update_query = """
+                    INSERT INTO CASH_manualbroses (date, name_player, id_player, id_agent, 
+                    hands, total_fee, winchips, id_club, apps, name_club) 
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s);
+                """
+                self.db_manager.many_update_query(insert_update_query, data)
+                logging.info(f'Synchronization for {table_name} completed successfully')
+            except Exception as e:
+                logging.error(f'Error during database operation for {table_name}: {e}')
+        else:
+            logging.info(f'No data to synchronize for {table_name}')
+
+    def synchronize_playerdata(self, rows, table_name):
+        keys = ['месяц', 'nickname', 'тренер', 'лимит', 'статус', 'тип игры', 'мейк', 'комментарий', 'группа']
+
+        data = []
+        for row in rows:
+            row = dict(zip(keys, row.values()))  # Переименование ключей
+            if not row.get('месяц'):
+                continue
+            try:
+                row['месяц'] = parse_date(row['месяц'])
+                if not row.get('лимит') or not row.get('лимит').isdigit():
+                    row['лимит'] = None
+
+                data.append((row['месяц'], row['nickname'], row['тренер'], row['лимит'], row['статус'], row['тип игры'],
+                             row['мейк'], row['комментарий'], row['группа']))
+            except Exception as e:
+                logging.error(f'Error processing row in {table_name}: {e}')
+
+        if data:
+            try:
+                self.db_manager.update_query('TRUNCATE TABLE CASH_playerdata;')
+                insert_update_query = """
+                    INSERT INTO CASH_playerdata (`date`, `nickname`, `coach`, `limit`, `status`, `game_type`, `make`, 
+                    `comment`, `group_name`) 
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s);
+                """
+                self.db_manager.many_update_query(insert_update_query, data)
+                logging.info(f'Synchronization for {table_name} completed successfully')
+            except Exception as e:
+                logging.error(f'Error during database operation for {table_name}: {e}')
+        else:
+            logging.info(f'No data to synchronize for {table_name}')
+
+    def synchronize_tables(self, rows, table_name):
+        keys = ['date', 'time', 'soft', 'name_club', 'id_player', 'ID telegram', 'Name', 'SName', 'club_nick',
+                'nickname', 'id_agent', 'id_subagent', 'name_subagent', 'id_row']
+
+        data = []
+        for row in rows:
+            row = dict(zip(keys, row.values()))  # Переименование ключей
+            if not row['date']:
+                continue
+            if not row.get('id_player').isdigit():
+                row['id_player'] = 0
+            if not row.get('ID telegram').isdigit():
+                row['ID telegram'] = 0
+            if not row.get('id_subagent').isdigit():
+                row['id_subagent'] = 0
+
+            # Преобразование объединенной строки в объект datetime
+            row['date'] = parse_date(row['date'])
+            data.append((row['date'], row['soft'], row['name_club'], row['id_player'], row['ID telegram'], row['Name'],
+                         row['SName'], row['club_nick'], row['nickname'], row['id_subagent'], row['name_subagent'],
+                         row['id_agent']))
+
+        if data:
+            try:
+                self.db_manager.update_query('TRUNCATE TABLE CASH_playerrecord;')
+                insert_update_query = """
+                    INSERT INTO CASH_playerrecord (date, soft, name_club, id_player, id_telegram, name, sname, 
+                    club_nick, nickname, id_subagent, name_subagent, name_agent) 
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s);
+                """
+                self.db_manager.many_update_query(insert_update_query, data)
+                logging.info(f'Synchronization for {table_name} completed successfully')
+            except Exception as e:
+                logging.error(f'Error during database operation for {table_name}: {e}')
+        else:
+            logging.info(f'No data to synchronize for {table_name}')
+
+    def synchronize_res_bros(self, rows, table_name):
+        keys = ['date_res', 'date_start', 'date_end', 'name agent', 'id agent', 'name club', 'id club', 'name player',
+                'id_player', 'last login', 'hands', 'total_fee', 'mtt_fee', 'claimed back', 'send out', 'total_win',
+                'mtt win', 'mtt hands', 'jackpot', 'leaderboard', 'insurance', 'buyin', 'winchips', 'week', 'apps']
+
+        data = []
+        for row in rows:
+            row = dict(zip(keys, row.values()))  # Переименование ключей
+            if not row.get('date_res'):
+                continue
+            try:
+                row['date_res'] = parse_date(row['date_res'])
+                row['date_start'] = parse_date(row['date_start'])
+                row['hands'] = convert_to_number(row['hands'], int)
+                row['total_fee'] = convert_to_number(row['total_fee'])
+                row['mtt_fee'] = convert_to_number(row['mtt_fee'])
+                row['claimed back'] = convert_to_number(row['claimed back'])
+                row['send out'] = convert_to_number(row['send out'])
+                row['total_win'] = convert_to_number(row['total_win'])
+                row['mtt win'] = convert_to_number(row['mtt win'])
+                row['mtt hands'] = convert_to_number(row['mtt hands'], int)
+                row['jackpot'] = convert_to_number(row['jackpot'])
+                row['leaderboard'] = convert_to_number(row['leaderboard'])
+                row['winchips'] = convert_to_number(row['winchips'])
+                row['insurance'] = convert_to_number(row['insurance'])
+                row['buyin'] = convert_to_number(row['buyin'])
+                row['id_player'] = convert_to_number(row['id_player'])
+                data.append((row['date_res'], row['date_start'], row['date_end'], row['name agent'], row['id agent'],
+                             row['name club'], row['id club'], row['name player'], row['id_player'], row['last login'],
+                             row['hands'], row['total_fee'], row['mtt_fee'], row['claimed back'], row['send out'],
+                             row['total_win'], row['mtt win'], row['mtt hands'], row['jackpot'], row['leaderboard'],
+                             row['insurance'], row['buyin'], row['winchips'], row['week'], row['apps']))
+            except Exception as e:
+                logging.error(f'Error processing row in {table_name}: {e}')
+
+        if data:
+            try:
+                self.db_manager.update_query('TRUNCATE TABLE CASH_brosres;')
+                insert_update_query = """
+                    INSERT INTO CASH_brosres (date, date_start, date_end, name_agent, id_agent, name_club, id_club,
+                                              name_player, id_player, last_login, hands, total_fee, mtt_fee, claimed_back,
+                                              send_out, total_win, mtt_win, mtt_hands, jackpot, leaderboard, insurance,
+                                              buyin, winchips, week, apps)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """
+                self.db_manager.many_update_query(insert_update_query, data)
+                logging.info(f'Synchronization for {table_name} completed successfully')
+            except Exception as e:
+                logging.error(f'Error during database operation for {table_name}: {e}')
+        else:
+            logging.info(f'No data to synchronize for {table_name}')
+
+    def synchronize_res_bros_rate_currency(self, rows, table_name):
+        keys = ['date', 'one_unit', 'currency', 'one_unit_usd']
+
+        data = []
+        for row in rows:
+            row = dict(zip(keys, row.values()))
+            if not row.get('date'):
+                continue
+            try:
+                row['date'] = parse_date(row['date'])
+                row['one_unit'] = convert_to_number(row['one_unit'], int)
+                row['one_unit_usd'] = convert_to_number(row['one_unit_usd'])
+                data.append((row['date'], row['one_unit'], row['currency'], row['one_unit_usd']))
+            except Exception as e:
+                logging.error(f'Error processing row in {table_name}: {e}')
+
+        if data:
+            try:
+                self.db_manager.update_query('TRUNCATE TABLE CASH_ratecurrency;')
+                insert_update_query = """
+                    INSERT INTO CASH_ratecurrency (date, one_unit, currency, one_unit_usd) 
+                    VALUES (%s, %s, %s, %s) 
+                """
+                self.db_manager.many_update_query(insert_update_query, data)
+                logging.info(f'Synchronization for {table_name} completed successfully')
+            except Exception as e:
+                logging.error(f'Error during database operation for {table_name}: {e}')
+        else:
+            logging.info(f'No data to synchronize for {table_name}')
+
+    def synchronize_res_bros_terms_of_clubs(self, rows, table_name):
+        keys = ['date', 'club', 'currency', 'chip', 'rakeback']
+        data = []
+        for row in rows:
+            row = dict(zip(keys, row.values()))  # Переименование ключей
+            if not row.get('date'):
+                continue
+            try:
+                row['chip'] = convert_to_number(row['chip'])
+                row['rakeback'] = convert_to_number(row['rakeback'])
+                data.append((row['date'], row['club'], row['currency'], row['chip'], row['rakeback']))
+            except Exception as e:
+                logging.error(f'Error processing row in {table_name}: {e}')
+
+        if data:
+            try:
+                self.db_manager.update_query('TRUNCATE TABLE CASH_termsofclubs;')
+                insert_update_query = """
+                    INSERT INTO CASH_termsofclubs (date, club, currency, chip, rakeback) 
+                    VALUES (%s, %s, %s, %s, %s)
+                """
+                self.db_manager.many_update_query(insert_update_query, data)
+                logging.info(f'Synchronization for {table_name} completed successfully')
+            except Exception as e:
+                logging.error(f'Error during database operation for {table_name}: {e}')
+        else:
+            logging.info(f'No data to synchronize for {table_name}')
+
+    def synchronize_cur_agent(self, rows, table_name):
+        keys = ['type account', 'room', 'login', 'password', 'nickname', 'clubs', 'union', 'id club',
+                'ID агента', 'email', 'pass', 'id_row']
+        data = []
+        for row in rows:
+            try:
+                row = dict(zip(keys, row.values()))  # Переименование ключей
+                data.append(
+                    (int(row['id_row']), row['type account'], row['room'], row['login'], row['password'],
+                     row['nickname'], row['clubs'], row['union'], row['id club'], row['ID агента'], row['email'],
+                     row['pass']))
+            except Exception as e:
+                logging.error(f'Error processing row in {table_name}: {e}')
+
+        if data:
+            try:
+                self.db_manager.update_query('TRUNCATE TABLE CASH_ratecurrencyagent;')
+                insert_update_query = """
+                    INSERT INTO CASH_ratecurrencyagent (id, type_account, room, pwd, login, nickname, clubs, `union`, id_club, id_agent, email, pass_field) 
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) 
+                """
+                self.db_manager.many_update_query(insert_update_query, data)
+                logging.info(f'Synchronization for {table_name} completed successfully')
+            except Exception as e:
+                logging.error(f'Error during database operation for {table_name}: {e}')
+        else:
+            logging.info(f'No data to synchronize for {table_name}')
+
+    def synchronize_cur_group(self, rows, table_name):
+        keys = ['id_row', 'type_group', 'sub_group', 'group']
+        data = []
+        for row in rows:
+            try:
+                row = dict(zip(keys, row.values()))  # Переименование ключей
+                data.append((row['id_row'], row['type_group'], row['sub_group'], row['group']))
+            except Exception as e:
+                logging.error(f'Error processing row in {table_name}: {e}')
+
+        if data:
+            try:
+                self.db_manager.update_query('TRUNCATE TABLE CASH_ratecurrencygroup;')
+                insert_update_query = """
+                    INSERT INTO CASH_ratecurrencygroup (id, type_group, sub_group, group_name) 
+                    VALUES (%s, %s, %s, %s) 
+                    ON DUPLICATE KEY UPDATE 
+                        type_group = VALUES(type_group), 
+                        sub_group = VALUES(sub_group), 
+                        group_name = VALUES(group_name);
+                """
+                self.db_manager.many_update_query(insert_update_query, data)
+                logging.info(f'Synchronization for {table_name} completed successfully')
+            except Exception as e:
+                logging.error(f'Error during database operation for cur_group: {e}')
+        else:
+            logging.info(f'No data to synchronize for {table_name}')
+
+    def synchronize_res_screen(self, rows, table_name):
+        keys = ['date', 'name_player', 'id_player', 'id_agent', 'hands', 'rake', 'win', 'club_id', 'id_row', 'apps',
+                'club_name']
+        data = []
+
+        for row in rows:
+            row = dict(zip(keys, row.values()))  # Переименование ключей
+            if not row.get('date'):
+                continue
+            try:
+                row['hands'] = convert_to_number(row['hands'], int)
+                row['rake'] = convert_to_number(row['rake'])
+                row['win'] = convert_to_number(row['win'])
+                date = parse_date(row['date'])
+                week = date.isocalendar()[1]
+
+                data.append((
+                    row['id_row'], date, row['name_player'], row['id_player'], row['id_agent'],
+                    row['hands'], row['rake'], row['win'],
+                    row['club_id'], row['apps'], week, row['club_name']
+                ))
+            except Exception as e:
+                logging.error(f'Error processing row in {table_name}: {e}')
+
+        if data:
+            try:
+                self.db_manager.update_query('TRUNCATE TABLE CASH_screenres;')
+                insert_update_query = """
+                    INSERT INTO CASH_screenres (id, date, name_player, id_player, id_agent, hands, total_fee, winchips, id_club, apps, week, name_club) 
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) 
+                """
+                self.db_manager.many_update_query(insert_update_query, data)
+                logging.info(f'{table_name} synchronization completed successfully')
+            except Exception as e:
+                logging.error(f'Error during database operation for {table_name}: {e}')
+        else:
+            logging.error(f'No data to synchronize for {table_name}')
+
+
+# Словарь с данными для синхронизации
+values = {
+    "res_screen": {
+        "sheet_url": 'https://docs.google.com/spreadsheets/d/16fkLTc2Y_hC-ICNltvAJafyM8yHkmG2WhTmA6FW9HIM',
+        "sheet_id": 1031036551},
+    "rateCurrencyGroup": {
+        "sheet_url": 'https://docs.google.com/spreadsheets/d/1FgJoUgOgWsjoq8xuj4KydeyZsUVnrU20qUUO7Xf-wLY',
+        "sheet_id": 1141759161},
+    "rateCurrencyAgent": {
+        "sheet_url": 'https://docs.google.com/spreadsheets/d/1FgJoUgOgWsjoq8xuj4KydeyZsUVnrU20qUUO7Xf-wLY',
+        "sheet_id": 629551531},
+    "res_bros_rate_currency": {
+        "sheet_url": 'https://docs.google.com/spreadsheets/d/1xBc4yk7VSoFXOgJAyP_tESUl8vfPvXa3RYRpZ9A8Y4w',
+        "sheet_id": 1426282865},
+    "res_bros_terms_of_clubs": {
+        "sheet_url": 'https://docs.google.com/spreadsheets/d/1xBc4yk7VSoFXOgJAyP_tESUl8vfPvXa3RYRpZ9A8Y4w',
+        "sheet_id": 1325845610},
+    "res_bros": {
+        "sheet_url": 'https://docs.google.com/spreadsheets/d/1xBc4yk7VSoFXOgJAyP_tESUl8vfPvXa3RYRpZ9A8Y4w',
+        "sheet_id": 0},
+    "playerrecord": {
+        "sheet_url": 'https://docs.google.com/spreadsheets/d/1dvJit_YnPGs5O6PQDCGXNlfrWFdBDzcAKPu19sHVfmw',
+        "sheet_id": 0},
+    "playerdata": {
+        "sheet_url": 'https://docs.google.com/spreadsheets/d/1mEPxd93sL8M28xRAyr6g0hUUEZ49iqJfm5v39TY3WlQ',
+        "sheet_id": 989488676},
+    "manual_broses": {
+        "sheet_url": 'https://docs.google.com/spreadsheets/d/16fkLTc2Y_hC-ICNltvAJafyM8yHkmG2WhTmA6FW9HIM',
+        "sheet_id": 1217963827},
+    "mtt_trainer": {
+        "sheet_url": 'https://docs.google.com/spreadsheets/d/17FWNbfcsZFtsbqobVJLaRnyrtKW6C6J82pg6kcVZ4Hs',
+        "sheet_id": 816572638},
+    "mtt_players": {
+        "sheet_url": 'https://docs.google.com/spreadsheets/d/17FWNbfcsZFtsbqobVJLaRnyrtKW6C6J82pg6kcVZ4Hs',
+        "sheet_id": 816572638},
+    # "mtt_report": {
+    #     "sheet_url": 'https://docs.google.com/spreadsheets/d/17FWNbfcsZFtsbqobVJLaRnyrtKW6C6J82pg6kcVZ4Hs',
+    #     "sheet_id": 816572638},
+    "mtt_userreport": {
+        "sheet_url": 'https://docs.google.com/spreadsheets/d/17FWNbfcsZFtsbqobVJLaRnyrtKW6C6J82pg6kcVZ4Hs',
+        "sheet_id": 0},
+    "mtt_audit": {
+        "sheet_url": 'https://docs.google.com/spreadsheets/d/17FWNbfcsZFtsbqobVJLaRnyrtKW6C6J82pg6kcVZ4Hs',
+        "sheet_id": 1585414996},
+
+}
+
+if __name__ == '__main__':
+    synchronizer = DataSynchronizer()
+
+    keys = list(values.keys())
+    text_keys = '0. All\n' + '\n'.join([f'{en + 1}. {x}' for en, x in enumerate(keys)])
+
+    while True:
+        select = input(f'Select:\n{text_keys}\n')
+        if not select.isdigit():
+            print('Введите число')
+            continue
+        select = int(select)
+        if select == 0:
+            # Если выбран вариант "All", передаем весь словарь values
+            synchronizer.synchronize(values)
+            break
+        elif 0 < select <= len(keys):
+            selected_key = keys[select - 1]
+            selected_dict = values[selected_key]
+            # Передаем выбранный словарь в функцию
+            synchronizer.synchronize({selected_key: selected_dict})
+            break
+        else:
+            print('Неверный выбор, попробуйте снова.')
