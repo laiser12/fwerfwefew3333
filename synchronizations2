@@ -8,10 +8,10 @@ from google.oauth2 import service_account
 
 # Конфигурация базы данных
 db_config = {
-    'host': '185.120.57.125',
+    'host': 'host',
     'user': 'admin',
-    'password': 'v8S7b$82j51d1',
-    'database': 'webpanel'
+    'password': 'v8S7b$password',
+    'database': 'database'
 }
 
 google_creds_file = 'data/credentials.json'
@@ -749,46 +749,46 @@ class DataSynchronizer:
 # Словарь с данными для синхронизации
 values = {
     "res_screen": {
-        "sheet_url": 'https://docs.google.com/spreadsheets/d/16fkLTc2Y_hC-ICNltvAJafyM8yHkmG2WhTmA6FW9HIM',
+        "sheet_url": 'sheet_url',
         "sheet_id": 1031036551},
     "rateCurrencyGroup": {
-        "sheet_url": 'https://docs.google.com/spreadsheets/d/1FgJoUgOgWsjoq8xuj4KydeyZsUVnrU20qUUO7Xf-wLY',
+        "sheet_url": 'sheet_url',
         "sheet_id": 1141759161},
     "rateCurrencyAgent": {
-        "sheet_url": 'https://docs.google.com/spreadsheets/d/1FgJoUgOgWsjoq8xuj4KydeyZsUVnrU20qUUO7Xf-wLY',
+        "sheet_url": 'sheet_url',
         "sheet_id": 629551531},
     "res_bros_rate_currency": {
-        "sheet_url": 'https://docs.google.com/spreadsheets/d/1xBc4yk7VSoFXOgJAyP_tESUl8vfPvXa3RYRpZ9A8Y4w',
+        "sheet_url": 'sheet_url',
         "sheet_id": 1426282865},
     "res_bros_terms_of_clubs": {
-        "sheet_url": 'https://docs.google.com/spreadsheets/d/1xBc4yk7VSoFXOgJAyP_tESUl8vfPvXa3RYRpZ9A8Y4w',
+        "sheet_url": 'sheet_url',
         "sheet_id": 1325845610},
     "res_bros": {
-        "sheet_url": 'https://docs.google.com/spreadsheets/d/1xBc4yk7VSoFXOgJAyP_tESUl8vfPvXa3RYRpZ9A8Y4w',
+        "sheet_url": 'sheet_url',
         "sheet_id": 0},
     "playerrecord": {
-        "sheet_url": 'https://docs.google.com/spreadsheets/d/1dvJit_YnPGs5O6PQDCGXNlfrWFdBDzcAKPu19sHVfmw',
+        "sheet_url": 'sheet_url',
         "sheet_id": 0},
     "playerdata": {
-        "sheet_url": 'https://docs.google.com/spreadsheets/d/1mEPxd93sL8M28xRAyr6g0hUUEZ49iqJfm5v39TY3WlQ',
+        "sheet_url": 'sheet_url',
         "sheet_id": 989488676},
     "manual_broses": {
-        "sheet_url": 'https://docs.google.com/spreadsheets/d/16fkLTc2Y_hC-ICNltvAJafyM8yHkmG2WhTmA6FW9HIM',
+        "sheet_url": 'sheet_url',
         "sheet_id": 1217963827},
     "mtt_trainer": {
-        "sheet_url": 'https://docs.google.com/spreadsheets/d/17FWNbfcsZFtsbqobVJLaRnyrtKW6C6J82pg6kcVZ4Hs',
+        "sheet_url": 'sheet_url',
         "sheet_id": 816572638},
     "mtt_players": {
-        "sheet_url": 'https://docs.google.com/spreadsheets/d/17FWNbfcsZFtsbqobVJLaRnyrtKW6C6J82pg6kcVZ4Hs',
+        "sheet_url": 'sheet_url',
         "sheet_id": 816572638},
     # "mtt_report": {
-    #     "sheet_url": 'https://docs.google.com/spreadsheets/d/17FWNbfcsZFtsbqobVJLaRnyrtKW6C6J82pg6kcVZ4Hs',
+    #     "sheet_url": 'sheet_url',
     #     "sheet_id": 816572638},
     "mtt_userreport": {
-        "sheet_url": 'https://docs.google.com/spreadsheets/d/17FWNbfcsZFtsbqobVJLaRnyrtKW6C6J82pg6kcVZ4Hs',
+        "sheet_url": 'sheet_url',
         "sheet_id": 0},
     "mtt_audit": {
-        "sheet_url": 'https://docs.google.com/spreadsheets/d/17FWNbfcsZFtsbqobVJLaRnyrtKW6C6J82pg6kcVZ4Hs',
+        "sheet_url": 'sheet_url',
         "sheet_id": 1585414996},
 
 }
